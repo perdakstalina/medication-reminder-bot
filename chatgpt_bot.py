@@ -1,4 +1,3 @@
-from aiohttp import web
 import asyncio
 import os
 import requests
@@ -9,6 +8,7 @@ from aiogram.filters import Command
 from aiogram.types import InlineKeyboardMarkup, InlineKeyboardButton
 from aiogram.fsm.state import State, StatesGroup
 from datetime import datetime
+from pytz import timezone
 import aioschedule as schedule
 import sqlite3
 from aiogram.client.session.aiohttp import AiohttpSession
@@ -20,6 +20,9 @@ from dotenv import load_dotenv
 load_dotenv()
 API_TOKEN = os.getenv("API_TOKEN")
 PORT = int(os.getenv("PORT", 8080))  # Порт, который Render ожидает (по умолчанию 8080)
+
+# Указываем временную зону Москвы
+moscow_tz = timezone("Europe/Moscow")
 
 # Подключение к базе данных
 db_path = os.getenv("DB_PATH", "medication_reminders.db")  # Используем путь из переменной среды, если указан
@@ -50,24 +53,12 @@ CREATE TABLE IF NOT EXISTS reminders (
 """)
 conn.commit()
 
-# Фейковый веб-сервер для Render
-async def handle(request):
-    return web.Response(text="Bot is running!")
-
-async def start_server():
-    app = web.Application()
-    app.router.add_get('/', handle)
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-
-# Логика бота (осталась без изменений)
-
+# Состояния для FSM
 class ReminderState(StatesGroup):
     medication_name = State()
     reminder_time = State()
 
+# Клавиатуры
 def main_menu():
     return InlineKeyboardMarkup(inline_keyboard=[
         [InlineKeyboardButton(text="➕ Добавить препарат", callback_data="add_reminder")],
@@ -84,6 +75,7 @@ def reminder_menu():
         [InlineKeyboardButton(text="🏠 Главное меню", callback_data="main_menu")]
     ])
 
+# Команды
 @dp.message(Command("start"))
 async def start_command(message: types.Message):
     user_name = message.from_user.first_name or "друг"
@@ -175,10 +167,13 @@ async def delete_reminder(call: types.CallbackQuery):
     await call.message.edit_text(
         "✅ Напоминание удалено!",
         reply_markup=main_menu()
-    )
+    ) 
 
 async def send_reminders():
-    now = datetime.now().strftime("%H:%M")
+    # Получаем текущее время в МСК
+    now = datetime.now(moscow_tz).strftime("%H:%M")
+    print(f"Checking reminders at {now}")  # Логирование для диагностики
+
     cursor.execute("SELECT id, user_id, medication_name FROM reminders WHERE reminder_time = ? AND sent = 0", (now,))
     reminders = cursor.fetchall()
 
@@ -203,15 +198,21 @@ async def scheduler():
                 job.job_func()
         await asyncio.sleep(1)
 
-async def main():
-    # Запуск фейкового веб-сервера
-    asyncio.create_task(start_server())
+async def start_server():
+    from aiohttp import web
+    async def handle(request):
+        return web.Response(text="Bot is running!")
+    app = web.Application()
+    app.router.add_get('/', handle)
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
 
-    # Планировщик для напоминаний
+async def main():
+    asyncio.create_task(start_server())  # Запуск фейкового веб-сервера для Render
     schedule.every().minute.do(send_reminders)
     asyncio.create_task(scheduler())
-
-    # Запуск бота
     await dp.start_polling(bot)
 
 if __name__ == "__main__":
